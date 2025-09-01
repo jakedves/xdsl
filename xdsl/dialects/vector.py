@@ -4,6 +4,9 @@ from abc import ABC
 from collections.abc import Sequence
 from typing import ClassVar, cast
 
+from typing_extensions import deprecated
+
+from xdsl.dialects.arith import FastMathFlagsAttr
 from xdsl.dialects.builtin import (
     I1,
     AffineMapAttr,
@@ -31,14 +34,22 @@ from xdsl.dialects.utils import (
     verify_dynamic_index_list,
 )
 from xdsl.dialects.utils.dynamic_index_list import DynamicIndexList
-from xdsl.ir import Attribute, Dialect, Operation, SSAValue
+from xdsl.ir import (
+    Attribute,
+    Dialect,
+    EnumAttribute,
+    Operation,
+    SSAValue,
+)
 from xdsl.ir.affine import AffineConstantExpr, AffineDimExpr, AffineMap
 from xdsl.irdl import (
+    AnyAttr,
     AttrSizedOperandSegments,
     IRDLOperation,
     ParsePropInAttrDict,
     VarConstraint,
     base,
+    irdl_attr_definition,
     irdl_op_definition,
     operand_def,
     opt_operand_def,
@@ -49,12 +60,13 @@ from xdsl.irdl import (
     traits_def,
     var_operand_def,
 )
-from xdsl.parser import Parser, UnresolvedOperand
+from xdsl.parser import AttrParser, Parser, UnresolvedOperand
 from xdsl.printer import Printer
 from xdsl.traits import Pure
 from xdsl.utils.exceptions import VerifyException
 from xdsl.utils.hints import isa
 from xdsl.utils.lexer import Position
+from xdsl.utils.str_enum import StrEnum
 
 DYNAMIC_INDEX: int = -(2**63)
 
@@ -72,6 +84,17 @@ class LoadOp(IRDLOperation):
         "$base `[` $indices `]` attr-dict `:` type($base) `,` type($result)"
     )
 
+    def __init__(
+        self,
+        ref: SSAValue | Operation,
+        indices: Sequence[SSAValue | Operation],
+        result_type: VectorType,
+    ):
+        super().__init__(
+            operands=(ref, indices),
+            result_types=(result_type,),
+        )
+
     def verify_(self):
         assert isa(self.base.type, MemRefType)
         assert isa(self.result.type, VectorType[Attribute])
@@ -84,16 +107,13 @@ class LoadOp(IRDLOperation):
         if self.base.type.get_num_dims() != len(self.indices):
             raise VerifyException("Expected an index for each dimension.")
 
+    @deprecated("Please use vector.LoadOp(ref, indices, result_type)")
     @staticmethod
     def get(
         ref: SSAValue | Operation, indices: Sequence[SSAValue | Operation]
     ) -> LoadOp:
         ref = SSAValue.get(ref, type=MemRefType)
-
-        return LoadOp.build(
-            operands=[ref, indices],
-            result_types=[VectorType(ref.type.element_type, [1])],
-        )
+        return LoadOp(ref, indices, VectorType(ref.type.element_type, [1]))
 
 
 @irdl_op_definition
@@ -109,6 +129,18 @@ class StoreOp(IRDLOperation):
         "$vector `,` $base `[` $indices `]` attr-dict `:` type($base) `,` type($vector)"
     )
 
+    def __init__(
+        self,
+        vector: SSAValue | Operation,
+        base: SSAValue | Operation,
+        indices: Sequence[SSAValue | Operation],
+        nontemporal: BoolAttr | None = None,
+    ):
+        super().__init__(
+            operands=[vector, base, indices],
+            properties={"nontemporal": nontemporal},
+        )
+
     def verify_(self):
         assert isa(self.base.type, MemRefType)
         assert isa(self.vector.type, VectorType[Attribute])
@@ -121,17 +153,22 @@ class StoreOp(IRDLOperation):
         if self.base.type.get_num_dims() != len(self.indices):
             raise VerifyException("Expected an index for each dimension.")
 
+    @deprecated("Please use vector.StoreOp(vector, ref, indices)")
     @staticmethod
     def get(
         vector: Operation | SSAValue,
         ref: Operation | SSAValue,
         indices: Sequence[Operation | SSAValue],
     ) -> StoreOp:
-        return StoreOp.build(operands=[vector, ref, indices])
+        return StoreOp(vector, ref, indices)
 
 
 @irdl_op_definition
 class BroadcastOp(IRDLOperation):
+    """
+    See external [documentation](https://mlir.llvm.org/docs/Dialects/Vector/#vectorbroadcast-vectorbroadcastop).
+    """
+
     name = "vector.broadcast"
     source = operand_def()
     vector = result_def(VectorType)
@@ -139,20 +176,24 @@ class BroadcastOp(IRDLOperation):
 
     assembly_format = "$source attr-dict `:` type($source) `to` type($vector)"
 
-    def verify_(self):
-        assert isa(self.vector.type, VectorType[Attribute])
+    def __init__(self, source: Operation | SSAValue, result_type: VectorType):
+        super().__init__(operands=(source,), result_types=(result_type,))
 
-        if self.source.type != self.vector.type.element_type:
+    def verify_(self):
+        if isa(self.source.type, VectorType):
+            element_type = self.source.type.element_type
+        else:
+            element_type = self.source.type
+
+        if element_type != self.vector.type.element_type:
             raise VerifyException(
                 "Source operand and result vector must have the same element type."
             )
 
+    @deprecated("Please use vector.BroadcastOp(source, result_type)")
     @staticmethod
     def get(source: Operation | SSAValue) -> BroadcastOp:
-        return BroadcastOp.build(
-            operands=[source],
-            result_types=[VectorType(SSAValue.get(source).type, [1])],
-        )
+        return BroadcastOp(source, VectorType(SSAValue.get(source).type, [1]))
 
 
 @irdl_op_definition
@@ -169,16 +210,21 @@ class FMAOp(IRDLOperation):
 
     assembly_format = "$lhs `,` $rhs `,` $acc attr-dict `:` type($lhs)"
 
+    def __init__(
+        self,
+        lhs: Operation | SSAValue,
+        rhs: Operation | SSAValue,
+        acc: Operation | SSAValue,
+    ):
+        acc = SSAValue.get(acc)
+        super().__init__(operands=(lhs, rhs, acc), result_types=(acc.type,))
+
+    @deprecated("Please use vector.FMAOp(lhs, rhs, acc)")
     @staticmethod
     def get(
         lhs: Operation | SSAValue, rhs: Operation | SSAValue, acc: Operation | SSAValue
     ) -> FMAOp:
-        lhs = SSAValue.get(lhs, type=VectorType)
-
-        return FMAOp.build(
-            operands=[lhs, rhs, acc],
-            result_types=[VectorType(lhs.type.element_type, [1])],
-        )
+        return FMAOp(lhs, rhs, acc)
 
 
 @irdl_op_definition
@@ -191,6 +237,22 @@ class MaskedLoadOp(IRDLOperation):
     result = result_def(VectorRankConstraint(1))
 
     assembly_format = "$base `[` $indices `]` `,` $mask `,` $pass_thru attr-dict `:` type($base) `,` type($mask) `,` type($pass_thru) `into` type($result)"  # noqa: E501
+
+    def __init__(
+        self,
+        base: SSAValue | Operation,
+        indices: Sequence[SSAValue | Operation],
+        mask: SSAValue | Operation,
+        pass_thru: SSAValue | Operation,
+        result_type: VectorType | None = None,
+    ):
+        pass_thru = SSAValue.get(pass_thru, type=VectorType)
+        if result_type is None:
+            result_type = pass_thru.type
+        super().__init__(
+            operands=[base, indices, mask, pass_thru],
+            result_types=[result_type],
+        )
 
     def verify_(self):
         memref_type = self.base.type
@@ -219,6 +281,9 @@ class MaskedLoadOp(IRDLOperation):
         if memref_type.get_num_dims() != len(self.indices):
             raise VerifyException("Expected an index for each memref dimension.")
 
+    @deprecated(
+        "Please use vector.MaskedLoadOp(memref, indices, mask, passthrough, result_type)"
+    )
     @staticmethod
     def get(
         memref: SSAValue | Operation,
@@ -268,6 +333,18 @@ class MaskedStoreOp(IRDLOperation):
         if memref_type.get_num_dims() != len(self.indices):
             raise VerifyException("Expected an index for each memref dimension.")
 
+    def __init__(
+        self,
+        memref: SSAValue | Operation,
+        indices: Sequence[SSAValue | Operation],
+        mask: SSAValue | Operation,
+        value_to_store: SSAValue | Operation,
+    ):
+        super().__init__(operands=[memref, indices, mask, value_to_store])
+
+    @deprecated(
+        "Please use vector.MaskedStoreOp(memref, indices, mask, value_to_store)"
+    )
     @staticmethod
     def get(
         memref: SSAValue | Operation,
@@ -275,7 +352,7 @@ class MaskedStoreOp(IRDLOperation):
         mask: SSAValue | Operation,
         value_to_store: SSAValue | Operation,
     ) -> MaskedStoreOp:
-        return MaskedStoreOp.build(operands=[memref, indices, mask, value_to_store])
+        return MaskedStoreOp(memref, indices, mask, value_to_store)
 
 
 @irdl_op_definition
@@ -283,9 +360,13 @@ class PrintOp(IRDLOperation):
     name = "vector.print"
     source = operand_def()
 
+    def __init__(self, source: SSAValue | Operation):
+        super().__init__(operands=[SSAValue.get(source)])
+
+    @deprecated("Please use vector.PrintOp(source)")
     @staticmethod
     def get(source: Operation | SSAValue) -> PrintOp:
-        return PrintOp.build(operands=[source])
+        return PrintOp(source)
 
 
 @irdl_op_definition
@@ -296,6 +377,11 @@ class CreateMaskOp(IRDLOperation):
 
     assembly_format = "$mask_dim_sizes attr-dict `:` type(results)"
 
+    def __init__(
+        self, mask_operands: list[Operation | SSAValue], result_type: VectorType
+    ):
+        super().__init__(operands=(mask_operands,), result_types=(result_type,))
+
     def verify_(self):
         assert isa(self.mask_vector.type, VectorType[Attribute])
         if self.mask_vector.type.get_num_dims() != len(self.mask_dim_sizes):
@@ -303,6 +389,7 @@ class CreateMaskOp(IRDLOperation):
                 "Expected an operand value for each dimension of resultant mask."
             )
 
+    @deprecated("Please use vector.CreateMaskOp(mask_operands, result_type)")
     @staticmethod
     def get(mask_operands: list[Operation | SSAValue]) -> CreateMaskOp:
         return CreateMaskOp.build(
@@ -1168,23 +1255,96 @@ class TransferWriteOp(VectorTransferOperation):
         )
 
 
+class CombiningKindFlag(StrEnum):
+    """
+    Values specifying the kind of combining operation.
+    """
+
+    ADD = "add"
+    MUL = "mul"
+    MINUI = "minui"
+    MINSI = "minsi"
+    MINNUMF = "minnumf"
+    MAXUI = "maxui"
+    MAXSI = "maxsi"
+    MAXNUMF = "maxnumf"
+    AND = "and"
+    OR = "or"
+    XOR = "xor"
+    MAXIMUMF = "maximumf"
+    MINIMUMF = "minimumf"
+
+
+@irdl_attr_definition
+class CombiningKindAttr(EnumAttribute[CombiningKindFlag]):
+    """
+    A mirror of LLVM's vector.kind attribute.
+    """
+
+    name = "vector.kind"
+
+    def print_parameter(self, printer: Printer) -> None:
+        with printer.in_angle_brackets():
+            printer.print_string(self.data)
+
+    @classmethod
+    def parse_parameter(cls, parser: AttrParser) -> CombiningKindFlag:
+        with parser.in_angle_brackets():
+            return CombiningKindFlag(parser.parse_identifier())
+
+
+@irdl_op_definition
+class ReductionOp(IRDLOperation):
+    name = "vector.reduction"
+
+    _T: ClassVar = VarConstraint("T", AnyAttr())
+
+    vector = operand_def(VectorType.constr(_T))
+    acc = opt_operand_def(_T)
+    dest = result_def(_T)
+    kind = prop_def(CombiningKindAttr)
+    fastmath = prop_def(FastMathFlagsAttr, default_value=FastMathFlagsAttr("none"))
+
+    assembly_format = "$kind `,` $vector (`,` $acc^)? (`fastmath` `` $fastmath^)? attr-dict `:` type($vector) `into` type($dest)"
+
+    def __init__(
+        self,
+        vector: SSAValue | Operation,
+        kind: CombiningKindAttr,
+        acc: SSAValue | Operation | None = None,
+        fastmath: FastMathFlagsAttr | None = None,
+    ):
+        vector = SSAValue.get(vector)
+        super().__init__(
+            operands=[vector, acc],
+            result_types=[vector.type],
+            properties={
+                "kind": kind,
+                "fastmath": fastmath,
+            },
+        )
+
+
 Vector = Dialect(
     "vector",
     [
-        LoadOp,
-        StoreOp,
         BroadcastOp,
+        CreateMaskOp,
+        ExtractElementOp,
+        ExtractOp,
         FMAOp,
+        InsertElementOp,
+        InsertOp,
+        LoadOp,
         MaskedLoadOp,
         MaskedStoreOp,
         PrintOp,
-        CreateMaskOp,
-        ExtractOp,
-        ExtractElementOp,
-        InsertOp,
-        InsertElementOp,
+        ReductionOp,
+        StoreOp,
         TransferReadOp,
         TransferWriteOp,
     ],
-    [],
+    [
+        CombiningKindAttr,
+    ],
 )
