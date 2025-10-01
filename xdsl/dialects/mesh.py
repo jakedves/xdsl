@@ -1,3 +1,4 @@
+from abc import ABC
 from collections.abc import Sequence
 from enum import auto
 from typing import TypeAlias
@@ -9,7 +10,11 @@ from xdsl.dialects.builtin import (
     BytesAttr,
     DenseArrayBase,
     FlatSymbolRefAttr,
+    IndexType,
+    IndexTypeConstr,
+    IntegerAttr,
     SymbolNameConstraint,
+    TensorType,
     i16,
     i64,
 )
@@ -29,6 +34,7 @@ from xdsl.irdl import (
     IRDLOperation,
     irdl_attr_definition,
     irdl_op_definition,
+    operand_def,
     opt_prop_def,
     prop_def,
     result_def,
@@ -37,7 +43,10 @@ from xdsl.irdl import (
 )
 from xdsl.parser import AttrParser
 from xdsl.printer import Printer
-from xdsl.traits import Pure, SymbolOpInterface
+from xdsl.traits import (
+    Pure,
+    SymbolOpInterface,
+)
 from xdsl.utils.str_enum import StrEnum
 
 MeshAxis: TypeAlias = I16
@@ -143,6 +152,147 @@ class ShardingType(ParametrizedAttribute, TypeAttribute):
     name = "mesh.sharding"
 
 
+class CollectiveCommunicationOp(IRDLOperation, ABC):
+    mesh = prop_def(FlatSymbolRefAttr)
+    mesh_axes = prop_def(MeshAxesAttr, default_value=MeshAxesAttr(i16, BytesAttr(b"")))
+
+
+@irdl_op_definition
+class AllGatherOp(CollectiveCommunicationOp):
+    """
+    All-gather over a device mesh.
+
+    See [external documentation](todo)
+    """
+
+    name = "mesh.all_gather"
+
+    input = operand_def(TensorType)
+    gather_axis = prop_def(IntegerAttr.constr(IndexTypeConstr))
+
+    result = result_def(TensorType)
+
+    traits = traits_def(
+        Pure(),
+        # SameOperandsAndResultElementType(),
+        # SameOperandsAndResultRank(),
+    )
+
+    # TODO: assembly_format parsing/printing for integers and index broken
+    assembly_format = (
+        "$input `on` $mesh (`mesh_axes` `=` $mesh_axes^)? "
+        + "`gather_axis` `=` $gather_axis "
+        + "attr-dict `:` type($input) `->` type($result)"
+    )
+
+
+@irdl_op_definition
+class AllReduceOp(CollectiveCommunicationOp):
+    name = "mesh.all_reduce"
+
+    input = operand_def(TensorType)
+
+    reduction = prop_def(
+        ReductionKindAttr, default_value=ReductionKindAttr(ReductionKind.SUM)
+    )
+
+    result = result_def(TensorType)
+
+    traits = traits_def(
+        Pure(),
+    )
+
+    assembly_format = (
+        "$input `on` $mesh (`mesh_axes` `=` $mesh_axes^)? "
+        + "(`reduction` `=` $reduction^)? "
+        + "attr-dict `:` type($input) `->` type($result)"
+    )
+
+
+@irdl_op_definition
+class AllSliceOp(CollectiveCommunicationOp):
+    name = "mesh.all_slice"
+
+    input = operand_def(TensorType)
+    slice_axis = prop_def(IntegerAttr.constr(IndexTypeConstr))
+
+    result = result_def(TensorType)
+
+    traits = traits_def(
+        Pure(),
+    )
+
+    assembly_format = (
+        "$input `on` $mesh (`mesh_axes` `=` $mesh_axes^)? "
+        + "`slice_axis` `=` $slice_axis "
+        + "attr-dict `:` type($input) `->` type($result)"
+    )
+
+
+@irdl_op_definition
+class AllToAllOp(CollectiveCommunicationOp):
+    name = "mesh.all_to_all"
+
+    input = operand_def(TensorType)
+    split_axis = prop_def(IntegerAttr.constr(IndexTypeConstr))
+    concat_axis = prop_def(IntegerAttr.constr(IndexTypeConstr))
+
+    result = result_def(TensorType)
+
+    traits = traits_def(Pure())
+
+    assembly_format = (
+        "$input `on` $mesh (`mesh_axes` `=` $mesh_axes^)? "
+        + "`split_axis` `=` $split_axis "
+        + "`concat_axis` `=` $concat_axis "
+        + "attr-dict `:` type($input) `->` type($result)"
+    )
+
+
+@irdl_op_definition
+class BroadcastOp(CollectiveCommunicationOp):
+    name = "mesh.broadcast"
+
+    input = operand_def(TensorType)
+    root = prop_def(DenseArrayBase[I64])
+    root_dynamic = var_operand_def(IndexType)
+
+    result = result_def(TensorType)
+
+    traits = traits_def(Pure())
+
+    assembly_format = (
+        "$input `on` $mesh (`mesh_axes` `=` $mesh_axes^)? "
+        + "`root` `=` custom<DynamicIndexList>($root_dynamic, $root) "
+        + "attr-dict `:` functional-type(operands, results)"
+    )
+
+    custom_directives = (DynamicIndexList,)
+
+
+@irdl_op_definition
+class GatherOp(CollectiveCommunicationOp):
+    name = "mesh.gather"
+
+    input = operand_def(TensorType)
+    gather_axis = prop_def(IntegerAttr.constr(IndexTypeConstr))
+    root = prop_def(DenseArrayBase[I64])
+    root_dynamic = var_operand_def(IndexType)
+
+    result = result_def(TensorType)
+
+    traits = traits_def(Pure())
+
+    assembly_format = (
+        "$input `on` $mesh (`mesh_axes` `=` $mesh_axes^)? "
+        + "`gather_axis` `=` $gather_axis "
+        + "`root` `=` custom<DynamicIndexList>($root_dynamic, $root) "
+        + "attr-dict `:` functional-type(operands, results)"
+    )
+
+    custom_directives = (DynamicIndexList,)
+
+
 @irdl_op_definition
 class MeshOp(IRDLOperation):
     name = "mesh.mesh"
@@ -224,6 +374,12 @@ class ShardingOp(IRDLOperation):
 Mesh = Dialect(
     "mesh",
     [
+        AllGatherOp,
+        AllReduceOp,
+        AllSliceOp,
+        AllToAllOp,
+        BroadcastOp,
+        GatherOp,
         MeshOp,
         ShardingOp,
     ],
