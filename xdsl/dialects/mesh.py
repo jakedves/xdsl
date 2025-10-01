@@ -15,6 +15,7 @@ from xdsl.dialects.builtin import (
     IntegerAttr,
     SymbolNameConstraint,
     TensorType,
+    UnitAttr,
     i16,
     i64,
 )
@@ -178,7 +179,6 @@ class AllGatherOp(CollectiveCommunicationOp):
         # SameOperandsAndResultRank(),
     )
 
-    # TODO: assembly_format parsing/printing for integers and index broken
     assembly_format = (
         "$input `on` $mesh (`mesh_axes` `=` $mesh_axes^)? "
         + "`gather_axis` `=` $gather_axis "
@@ -294,6 +294,189 @@ class GatherOp(CollectiveCommunicationOp):
 
 
 @irdl_op_definition
+class RecvOp(CollectiveCommunicationOp):
+    """
+    Receive from a device within a device group.
+    """
+
+    name = "mesh.recv"
+
+    input = operand_def(TensorType)
+    source = opt_prop_def(DenseArrayBase[I64])
+    source_dynamic = var_operand_def(IndexType)
+
+    result = result_def(TensorType)
+
+    assembly_format = (
+        "$input `on` $mesh (`mesh_axes` `=` $mesh_axes^)? "
+        + "(`source` `=` custom<DynamicIndexList>($source_dynamic, $source)^)? "
+        + "attr-dict `:` functional-type(operands, results)"
+    )
+
+    custom_directives = (DynamicIndexList,)
+
+
+@irdl_op_definition
+class ReduceOp(CollectiveCommunicationOp):
+    """
+    Reduce over a device mesh.
+
+    Reduces on device `root` within each device group. `root` specifies the
+    coordinates of a device along `mesh_axes`. The accumulation element type
+    is given by the result type (input element type may differ and is converted
+    to the result element type before reduction).
+    """
+
+    name = "mesh.reduce"
+
+    input = operand_def(TensorType)
+
+    reduction = prop_def(
+        ReductionKindAttr, default_value=ReductionKindAttr(ReductionKind.SUM)
+    )
+
+    root = prop_def(DenseArrayBase[I64])
+    root_dynamic = var_operand_def(IndexType)
+
+    result = result_def(TensorType)
+
+    traits = traits_def(
+        Pure(),
+    )
+
+    assembly_format = (
+        "$input `on` $mesh (`mesh_axes` `=` $mesh_axes^)? "
+        + "(`reduction` `=` $reduction^)? "
+        + "`root` `=` custom<DynamicIndexList>($root_dynamic, $root) "
+        + "attr-dict `:` functional-type(operands, results)"
+    )
+
+    custom_directives = (DynamicIndexList,)
+
+
+@irdl_op_definition
+class ReduceScatterOp(CollectiveCommunicationOp):
+    """
+    Reduce-scatter over a device mesh.
+
+    After reduction the tensor is split along `scatter_axis` and the pieces
+    distributed across the device group.
+    """
+
+    name = "mesh.reduce_scatter"
+
+    input = operand_def(TensorType)
+
+    reduction = prop_def(
+        ReductionKindAttr, default_value=ReductionKindAttr(ReductionKind.SUM)
+    )
+
+    scatter_axis = prop_def(IntegerAttr.constr(IndexTypeConstr))
+
+    result = result_def(TensorType)
+
+    traits = traits_def(
+        Pure(),
+    )
+
+    assembly_format = (
+        "$input `on` $mesh (`mesh_axes` `=` $mesh_axes^)? "
+        + "(`reduction` `=` $reduction^)? "
+        + "`scatter_axis` `=` $scatter_axis "
+        + "attr-dict `:` type($input) `->` type($result)"
+    )
+
+
+@irdl_op_definition
+class ScatterOp(CollectiveCommunicationOp):
+    """
+    Scatter over a device mesh.
+
+    For each device group split the input tensor on the `root` device along
+    axis `scatter_axis` and scatter the parts across the group devices.
+    """
+
+    name = "mesh.scatter"
+
+    input = operand_def(TensorType)
+    scatter_axis = prop_def(IntegerAttr.constr(IndexTypeConstr))
+
+    root = prop_def(DenseArrayBase[I64])
+    root_dynamic = var_operand_def(IndexType)
+
+    result = result_def(TensorType)
+
+    traits = traits_def(
+        Pure(),
+    )
+
+    assembly_format = (
+        "$input `on` $mesh (`mesh_axes` `=` $mesh_axes^)? "
+        + "`scatter_axis` `=` $scatter_axis "
+        + "`root` `=` custom<DynamicIndexList>($root_dynamic, $root) "
+        + "attr-dict `:` functional-type(operands, results)"
+    )
+
+    custom_directives = (DynamicIndexList,)
+
+
+@irdl_op_definition
+class SendOp(CollectiveCommunicationOp):
+    """
+    Send from one device to another within a device group.
+    """
+
+    name = "mesh.send"
+
+    input = operand_def(TensorType)
+
+    destination = prop_def(DenseArrayBase[I64])
+    destination_dynamic = var_operand_def(IndexType)
+
+    result = result_def(TensorType)
+
+    assembly_format = (
+        "$input `on` $mesh (`mesh_axes` `=` $mesh_axes^)? "
+        + "`destination` `=` custom<DynamicIndexList>($destination_dynamic, $destination) "
+        + "attr-dict `:` functional-type(operands, results)"
+    )
+
+    custom_directives = (DynamicIndexList,)
+
+
+@irdl_op_definition
+class ShiftOp(CollectiveCommunicationOp):
+    """
+    Shift over a device mesh.
+
+    Within each device group shift along `shift_axis` by `offset`. If the
+    `rotate` flag is present a rotation is performed instead of a shift.
+    """
+
+    name = "mesh.shift"
+
+    input = operand_def(TensorType)
+
+    shift_axis = prop_def(IntegerAttr.constr(IndexTypeConstr))
+    offset = prop_def(IntegerAttr[I64])
+    rotate = prop_def(UnitAttr)
+
+    result = result_def(TensorType)
+
+    traits = traits_def(
+        Pure(),
+    )
+
+    assembly_format = (
+        "$input `on` $mesh (`mesh_axes` `=` $mesh_axes^)? "
+        + "`shift_axis` `=` $shift_axis "
+        + "`offset` `=` $offset "
+        + "(`rotate` $rotate^)? "
+        + "attr-dict `:` type($input) `->` type($result)"
+    )
+
+
+@irdl_op_definition
 class MeshOp(IRDLOperation):
     name = "mesh.mesh"
 
@@ -380,6 +563,12 @@ Mesh = Dialect(
         AllToAllOp,
         BroadcastOp,
         GatherOp,
+        RecvOp,
+        ReduceOp,
+        ReduceScatterOp,
+        ScatterOp,
+        SendOp,
+        ShiftOp,
         MeshOp,
         ShardingOp,
     ],
