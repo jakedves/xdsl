@@ -605,10 +605,20 @@ def get_all_passes() -> dict[str, Callable[[], type[ModulePass]]]:
 
         return x86_allocate_registers.X86AllocateRegisters
 
+    def get_x86_prologue_epilogue_insertion():
+        from xdsl.backend.x86 import prologue_epilogue_insertion
+
+        return prologue_epilogue_insertion.X86PrologueEpilogueInsertion
+
     def get_x86_infer_broadcast():
         from xdsl.transforms import x86_infer_broadcast
 
         return x86_infer_broadcast.X86InferBroadcast
+
+    def get_verify_register_allocation():
+        from xdsl.transforms import verify_register_allocation
+
+        return verify_register_allocation.VerifyRegisterAllocationPass
 
     # Please insert pass and `get_` function in alphabetical order
 
@@ -732,5 +742,7 @@ def get_all_passes() -> dict[str, Callable[[], type[ModulePass]]]:
         "varith-fuse-repeated-operands": get_varith_fuse_repeated_operands,
         "vector-split-load-extract": get_vector_split_load_extract,
         "x86-allocate-registers": get_x86_allocate_registers,
+        "x86-prologue-epilogue-insertion": get_x86_prologue_epilogue_insertion,
         "x86-infer-broadcast": get_x86_infer_broadcast,
+        "verify-register-allocation": get_verify_register_allocation,
     }
